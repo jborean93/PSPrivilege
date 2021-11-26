@@ -1,6 +1,6 @@
 # Changelog for PSPrivilege
 
-## v0.2.0 - TBD
+## v0.2.0 - 2021-11-26
 
 * Update to be compatible with PowerShell 7+
 * Bumps the minimum version to PowerShell 5.1 (.NET 4.7.2)
