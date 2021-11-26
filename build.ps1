@@ -1,59 +1,66 @@
-# thanks to http://ramblingcookiemonster.github.io/Building-A-PowerShell-Module/
+[CmdletBinding()]
+param(
+    [Parameter()]
+    [ValidateSet('Debug', 'Release')]
+    [string]
+    $Configuration = 'Debug',
 
-Function Resolve-Module {
-    [Cmdletbinding()]
-    param(
-        [Parameter(Mandatory=$true)][String]$Name,
-        [Parameter()][Version]$Version
-    )
+    [Parameter()]
+    [string]
+    $Task = 'Build'
+)
 
-    Write-Verbose -Message "Resolving module $Name"
-    $module = Get-Module -Name $Name -ListAvailable
-
-    if ($module) {
-        if ($null -eq $Version) {
-            Write-Verbose -Message "Module $Name is present, checking if version is the latest available"
-            $Version = (Find-Module -Name $Name -Repository PSGallery | `
-                Measure-Object -Property Version -Maximum).Maximum
-            $installed_version = ($module | Measure-Object -Property Version -Maximum).Maximum
-
-            $install = $installed_version -lt $Version
-        } else {
-            Write-Verbose -Message "Module $Name is present, checking if version matched $Version"
-            $version_installed = $module | Where-Object { $_.Version -eq $Version }
-            $install = $null -eq $version_installed
-        }
-
-        if ($install) {
-            Write-Verbose -Message "Installing module $Name at version $Version"
-            Install-Module -Name $Name -Force -SkipPublisherCheck -RequiredVersion $Version
-        }
-        Import-Module -Name $Name -RequiredVersion $Version
-    } else {
-        Write-Verbose -Message "Module $Name is not installed, installing"
-        $splat_args = @{}
-        if ($null -ne $Version) {
-            $splat_args.RequiredVersion = $Version
-        }
-        Install-Module -Name $Name -Force -SkipPublisherCheck @splat_args
-        Import-Module -Name $Name -Force
+end {
+    if ($PSEdition -eq 'Desktop') {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
     }
+
+    $modulePath = [IO.Path]::Combine($PSScriptRoot, 'tools', 'Modules')
+    $requirements = Import-PowerShellDataFile ([IO.Path]::Combine($PSScriptRoot, 'requirements-dev.psd1'))
+    foreach ($req in $requirements.GetEnumerator()) {
+        $targetPath = [IO.Path]::Combine($modulePath, $req.Key)
+
+        if (Test-Path -LiteralPath $targetPath) {
+            Import-Module -Name $targetPath -Force -ErrorAction Stop
+            continue
+        }
+
+        Write-Host "Installing build pre-req $($req.Key) as it is not installed"
+        New-Item -Path $targetPath -ItemType Directory | Out-Null
+
+        $webParams = @{
+            Uri = "https://www.powershellgallery.com/api/v2/package/$($req.Key)/$($req.Value)"
+            OutFile = [IO.Path]::Combine($modulePath, "$($req.Key).zip")  # WinPS requires the .zip extension to extract
+            UseBasicParsing = $true
+        }
+        if ('Authentication' -in (Get-Command -Name Invoke-WebRequest).Parameters.Keys) {
+            $webParams.Authentication = 'None'
+        }
+
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest @webParams
+            Expand-Archive -Path $webParams.OutFile -DestinationPath $targetPath -Force
+            Remove-Item -LiteralPath $webParams.OutFile -Force
+        }
+        finally {
+            $ProgressPreference = $oldProgress
+        }
+
+        Import-Module -Name $targetPath -Force -ErrorAction Stop
+    }
+
+    $dotnetTools = @(dotnet tool list --global) -join "`n"
+    if (-not $dotnetTools.Contains('coverlet.console')) {
+        Write-Host 'Installing dotnet tool coverlet.console'
+        dotnet tool install --global coverlet.console
+    }
+
+    $invokeBuildSplat = @{
+        Task = $Task
+        File = (Get-Item ([IO.Path]::Combine($PSScriptRoot, '*.build.ps1'))).FullName
+        Configuration = $Configuration
+    }
+    Invoke-Build @invokeBuildSplat
 }
-
-Get-PackageProvider -Name NuGet -ForceBootstrap > $null
-
-if ((Get-PSRepository -Name PSGallery).InstallationPolicy -ne "Trusted") {
-    Write-Verbose -Message "Setting PSGallery as a trusted repository"
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-}
-
-Resolve-Module -Name Psake
-Resolve-Module -Name PSDeploy
-Resolve-Module -Name Pester
-Resolve-Module -Name BuildHelpers
-Resolve-Module -Name PsScriptAnalyzer
-
-Set-BuildEnvironment
-
-Invoke-psake .\psake.ps1
-exit ( [int]( -not $psake.build_success ) )
